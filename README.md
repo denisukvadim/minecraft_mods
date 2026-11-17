@@ -320,6 +320,33 @@ src/
 └── mods/            # файли MODS_DIR: dto, storage (шляхи/журнал), routes
 migrations/
 └── 0001_init.sql    # уся схема; права й system-ролі сідить boot-сідер
+Dockerfile           # багатостадійна збірка образу (rust -> debian-slim, non-root)
+.github/workflows/docker.yml  # CI: збірка й пуш образу в GHCR з main
+```
+
+## Docker
+
+Образ збирається з `Dockerfile` і публікується в GHCR при кожному push у `main`:
+
+```bash
+docker pull ghcr.io/denisukvadim/minecraft_mods:latest
+
+docker run -d --name minecraft-mods \
+  -p 8080:8080 \
+  -v minecraft-mods-data:/app/data \
+  -e DATABASE_URL='postgres://user:pass@host:5432/minecraft_mods' \
+  -e JWT_SECRET='<мінімум 32 символи>' \
+  ghcr.io/denisukvadim/minecraft_mods:latest
+```
+
+Теги: `latest` (з `main`) і `sha-<commit>`. Змінні оточення — ті самі, що в
+`.env.example`; `MODS_DIR` в образі вже вказує на `/app/data/mods`, тому том
+`/app/data` зберігає завантажені моди між перезапусками.
+
+Локальна збірка:
+
+```bash
+docker build -t minecraft-mods .
 ```
 
 ## Перевірки

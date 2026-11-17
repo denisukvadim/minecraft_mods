@@ -1,0 +1,13 @@
+.git
+.gitignore
+.github
+.idea
+.env
+.env.*
+!.env.example
+data
+target
+Dockerfile
+docker-compose.yml
+*.md
+LICENSE
