@@ -56,7 +56,9 @@ pub async fn bootstrap(pool: &PgPool, config: &Config) -> anyhow::Result<()> {
     .await?;
 
     // The default role is seeded only when it is created, so an administrator
-    // can later take `mods:download` away without the next restart restoring it.
+    // can later take individual permissions away without the next restart
+    // restoring them. The Mods operator baseline can manage files and the
+    // container, and may onboard accounts with the same access.
     let new_user_role_id: Option<Uuid> = sqlx::query_scalar(
         r#"
         INSERT INTO roles (name, description, is_system)
@@ -72,7 +74,11 @@ pub async fn bootstrap(pool: &PgPool, config: &Config) -> anyhow::Result<()> {
         sqlx::query(
             r#"
             INSERT INTO role_permissions (role_id, permission_id)
-            SELECT $1, id FROM permissions WHERE code IN ('mods:read', 'mods:download')
+            SELECT $1, id FROM permissions
+            WHERE code IN (
+                'mods:read', 'mods:download', 'mods:upload', 'mods:delete',
+                'server:manage', 'users:create'
+            )
             ON CONFLICT DO NOTHING
             "#,
         )

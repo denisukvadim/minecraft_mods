@@ -37,6 +37,8 @@ pub struct CreateUserRequest {
     #[schema(example = "correct horse battery staple")]
     pub password: String,
     /// Roles attached on creation. Empty or omitted means the `user` role.
+    /// Only administrators may choose roles: other callers get exactly their
+    /// own roles and direct grants copied, so the account cannot exceed them.
     #[serde(default)]
     #[schema(example = "[\"user\"]")]
     pub roles: Vec<String>,

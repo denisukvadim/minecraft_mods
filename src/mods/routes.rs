@@ -273,7 +273,7 @@ pub async fn delete_mod(
         (status = 200, description = "Who uploaded, downloaded or deleted this file, newest first", body = Vec<ModFileActionDto>),
         (status = 400, description = "Invalid file name", body = ErrorResponse),
         (status = 401, description = "Missing or invalid token", body = ErrorResponse),
-        (status = 403, description = "Admin role required", body = ErrorResponse)
+        (status = 403, description = "Lacking mods:read", body = ErrorResponse)
     )
 )]
 pub async fn file_history(
@@ -282,7 +282,7 @@ pub async fn file_history(
     Path(file_name): Path<String>,
     Query(pagination): Query<Pagination>,
 ) -> Result<Json<Vec<ModFileActionDto>>, AppError> {
-    rbac::require_admin(&state.db, auth.id).await?;
+    rbac::require_permission(&state.db, auth.id, "mods:read").await?;
 
     // Validated, not resolved: history is kept after the file is deleted, so
     // the name is only used to filter the audit table.

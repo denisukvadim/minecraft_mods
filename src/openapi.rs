@@ -23,7 +23,10 @@ use crate::users::dto::{CreateUserRequest, UpdateUserRequest, UserDetail, UserSu
                        deletions are checked against per-role rules (mods:read, mods:download, \
                        mods:upload, mods:delete) and written to an audit trail. The Minecraft \
                        container is inspected and controlled through Portainer under \
-                       `server:manage`, and file changes are refused while it is running."
+                       `server:manage`, and file changes are refused while it is running. \
+                       Accounts holding `users:create` may create users, but only with \
+                       their own roles and direct grants (administrators choose roles \
+                       explicitly)."
     ),
     paths(
         crate::auth::routes::login,

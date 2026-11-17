@@ -21,10 +21,11 @@ utoipa 6 + Swagger UI, JWT HS256, Argon2id.
 - аутентифікація: `POST /auth/login`, `GET /auth/me`, JWT, Argon2id;
 - динамічний RBAC: permissions, роли, прямі видачі користувачу, `require_permission`;
 - керування користувачами/ролями/правилами — лише системна роль `admin`
-  (`require_admin`, перевірка імені ролі, не permission);
+  (`require_admin`, перевірка імені ролі, не permission); виняток —
+  `POST /users` за `users:create`, де не-адмін отримує рівно власний доступ;
 - моди на диску: list / upload (multipart, атомарний запис) / download / delete;
-- журнал `mod_file_actions` + `GET /mod-actions` і `GET /mods/{file_name}/history`
-  (тільки admin), ідентичність через `LEFT JOIN users`;
+- журнал `mod_file_actions` + `GET /mod-actions` (тільки admin) і
+  `GET /mods/{file_name}/history` (`mods:read`), ідентичність через `LEFT JOIN users`;
 - Swagger UI на `/docs`, OpenAPI JSON на `/api-docs/openapi.json`, `/health`;
 - міграції `0001`–`0005`, seed каталогу правил і system-ролей, bootstrap-адмін;
 - `cargo test --quiet` — **11/11 passed** (хешування, валідація, імена файлів,
@@ -39,9 +40,10 @@ utoipa 6 + Swagger UI, JWT HS256, Argon2id.
 - у `data/mods` лежить реальний файл користувача
   `trackwork-1.20.1-1.2.4.jar` (577 556 байт) — **не видаляти** під час тестів;
 - у `mod_file_actions` є рядок `id = 7` (upload цього файлу) — **не видаляти**;
-- роль `user` у цій конкретній БД має лише `mods:read`: seed додає
-  `mods:download` тільки новоствореній ролі. Якщо потрібно — видати через
-  `PUT /roles/{id}/permissions`;
+- роль `user` у цій конкретній БД історично мала лише `mods:read`;
+  `migrations/0002_user_role_access.sql` при наступному старті додає
+  `mods:upload`, `mods:delete`, `server:manage`, `users:create`. Далі набір
+  редагується через `PUT /roles/{id}/permissions`;
 - `.env` містить реальні креденшели до зовнішнього PostgreSQL. Не комітити, не
   вставляти в документи/логи.
 
@@ -163,9 +165,9 @@ src/
 | `POST` | `/api/v1/mods` | `mods:upload` (multipart, поле `file`) |
 | `GET` | `/api/v1/mods/{file_name}/download` | `mods:download` |
 | `DELETE` | `/api/v1/mods/{file_name}` | `mods:delete` |
-| `GET` | `/api/v1/mods/{file_name}/history` | **admin** (пагінація) |
+| `GET` | `/api/v1/mods/{file_name}/history` | `mods:read` (пагінація) |
 | `GET` | `/api/v1/mod-actions` | **admin** (пагінація) |
-| `POST` | `/api/v1/users` | **admin** |
+| `POST` | `/api/v1/users` | `users:create` (не-адмін копіює власний доступ) |
 | `GET` | `/api/v1/users`, `/users/{id}` | `users:read` |
 | `PATCH`/`DELETE` | `/api/v1/users/{id}` | **admin** |
 | `POST`/`DELETE` | `/api/v1/users/{id}/roles/{role_id}` | **admin** |
@@ -190,7 +192,8 @@ src/
 - ім'я файлу — один сегмент: без `/`, `\`, `..`, керуючих символів, не починається
   з `.`, максимум 200 символів; symlink не обслуговується;
 - upload атомарний (`.upload-<uuid>` → rename), існуюче ім'я → `409`, ліміт
-  `MODS_MAX_UPLOAD_BYTES` → `413`;
+  `MODS_MAX_UPLOAD_BYTES` → `413`; якщо запит іде через nginx адмінки, її
+  `client_max_body_size` (`CLIENT_MAX_BODY_SIZE`) теж має бути ≥ цього ліміту;
 - download завжди `application/octet-stream`, `Content-Disposition: attachment`,
   `X-Content-Type-Options: nosniff`; історія для невідомого файлу → `200 []`.
 
@@ -198,10 +201,13 @@ src/
 
 - **Керування — перевірка ролі `admin`, а не permission.** Інакше роль із правом
   на редагування правил могла б видати собі будь-що (privilege escalation).
-  Динамічні permissions лишилися для прикладного доступу (моди, читання довідників).
-- **Seed щостарту:** каталог правил і роль `admin` відновлюються завжди; роль `user`
-  отримує `mods:read` + `mods:download` лише при створенні, щоб адміністратор міг
-  забрати право без відновлення після рестарту.
+  Єдиний виняток — `POST /users` за `users:create`: не-адмін не обирає ролі, а
+  бекенд копіює його `user_roles` і `user_permissions` у новий акаунт у тій
+  самій транзакції. Динамічні permissions лишилися для прикладного доступу.
+- **Seed щостарту:** каталог правил і роль `admin` відновлюються завжди; роль
+  `user` отримує базовий набір оператора Mods лише при створенні, щоб
+  адміністратор міг забрати право без відновлення після рестарту. Для вже
+  наявних БД це робить `0002_user_role_access.sql` одноразово.
 - **Журнал не дублює ідентичність.** `user_id` + `LEFT JOIN users` дає актуальні
   username/email; після видалення акаунта join дає `NULL` («deleted account»).
   Хто потребує вічної атрибуції — деактивує акаунт, а не видаляє.
@@ -249,8 +255,10 @@ src/
 2. **`token_version` у `users`** + інкремент при зміні пароля/деактивації; перевірка
    у `AuthUser`. Разом із цим — refresh-токени, якщо потрібна довга сесія.
 3. **Ретенція журналу**: періодичне видалення/архівування старих рядків, індекс уже є.
-4. **Сервіс `api` у compose** для локального запуску всього стека (Dockerfile уже є,
-   образ публікується в GHCR з `main`); поруч — `minecraft` і `portainer`.
+4. **Compose для всього стека** вже є: `docker-compose.prod.yml` (API + адмінка,
+   Traefik, зовнішні мережі `proxy`/`postgress_postgres`, bind-том модів). Далі —
+   додати `healthcheck` на рівні Docker для API (у runtime-образі немає curl/wget)
+   і, за потреби, сервіси `minecraft`/`portainer` у той самий файл.
 5. **Метадані модів** (версія, опис, теги) — або sidecar-файл, або нова таблиця;
    поточний контракт свідомо мінімальний.
 6. **Власник файлу** і права «свій/чужий», якщо з'явиться багато видавців.
@@ -274,11 +282,14 @@ cargo run
 1. логін адміна → `/auth/me` містить `mods:read/download/upload/delete`;
 2. upload нового файлу → `201`, файл з'явився в `MODS_DIR`, у журналі рядок `upload`;
 3. list + download → SHA-256 збігається; у журналі `download`;
-4. не-адмін: list `200`, upload/delete `403`, журнал `403`;
+4. не-адмін `user`: list/upload/delete `200`/`201`, сервер `200`, загальний
+   журнал `403`;
 5. видати роль/право → доступ діє без перелогіну;
-6. `DELETE /mods/{name}` → `204`, файл зник, історія лишилася;
-7. `../`, `%2F`, приховані імена → `400`; повторний upload → `409`;
-8. видалити користувача → у журналі `user_id`/ім'я стають `NULL`.
+6. `user` створює користувача без `roles` → `201`, ролі й прямі права
+   збігаються з творцем; передача `roles` від не-адміна → `400`;
+7. `DELETE /mods/{name}` → `204`, файл зник, історія лишилася;
+8. `../`, `%2F`, приховані імена → `400`; повторний upload → `409`;
+9. видалити користувача → у журналі `user_id`/ім'я стають `NULL`.
 
 **Не робити під час тестів:** не видаляти `trackwork-1.20.1-1.2.4.jar` і рядок
 журналу `id = 7`, не застосовувати `cargo sqlx migrate revert` на живій БД, не
@@ -291,8 +302,9 @@ cargo run
 - `ADMIN_*` потрібні лише для першого створення адміна; після цього їх варто
   прибрати з `.env`.
 - `CORS_ORIGINS=*` небезпечний у проді — задайте origin адмінки.
-- Роль `user` у живій БД не має `mods:download` (див. розділ 2) — це не баг коду,
-  а наслідок seed-логіки «тільки при створенні».
+- Роль `user` у живій БД отримує новий базовий набір із
+  `0002_user_role_access.sql` при наступному старті; якщо міграцію вже
+  застосовано, подальші зміни — лише через `PUT /roles/{id}/permissions`.
 - Видалення користувача незворотно анонімізує його історію.
 - `/docs` змонтований поза `/api/v1`; проксі адмінки має вести і `/docs`.
 

@@ -17,6 +17,10 @@ pub const PERMISSION_CATALOG: &[(&str, &str)] = &[
     ("mods:upload", "Upload mod files"),
     ("mods:delete", "Delete mod files"),
     ("users:read", "View users"),
+    (
+        "users:create",
+        "Create users with access not exceeding your own",
+    ),
     ("roles:read", "View roles"),
     ("permissions:read", "View the permission catalog"),
     (
@@ -64,10 +68,8 @@ pub async fn require_permission(pool: &PgPool, user_id: Uuid, code: &str) -> Res
     }
 }
 
-/// Management endpoints (users, roles, permissions) are restricted to the
-/// system `admin` role. This is deliberately an identity check instead of a
-/// permission: a role that could edit permissions could grant itself anything.
-pub async fn require_admin(pool: &PgPool, user_id: Uuid) -> Result<(), AppError> {
+/// Whether the user carries the system `admin` role.
+pub async fn is_admin(pool: &PgPool, user_id: Uuid) -> Result<bool, AppError> {
     let is_admin: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS (
@@ -82,7 +84,16 @@ pub async fn require_admin(pool: &PgPool, user_id: Uuid) -> Result<(), AppError>
     .fetch_one(pool)
     .await?;
 
-    if is_admin {
+    Ok(is_admin)
+}
+
+/// Management endpoints (updating or deleting users, roles, permissions, and
+/// assigning access) are restricted to the system `admin` role. This is
+/// deliberately an identity check instead of a permission: a role that could
+/// edit permissions could grant itself anything. Creating a user is the one
+/// delegated exception (`users:create`), and it copies the creator's access.
+pub async fn require_admin(pool: &PgPool, user_id: Uuid) -> Result<(), AppError> {
+    if is_admin(pool, user_id).await? {
         Ok(())
     } else {
         Err(AppError::Forbidden)

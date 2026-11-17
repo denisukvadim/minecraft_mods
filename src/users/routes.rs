@@ -78,9 +78,9 @@ pub async fn list_users(
     request_body = CreateUserRequest,
     responses(
         (status = 201, description = "User created", body = UserDetail),
-        (status = 400, description = "Invalid payload or unknown role", body = ErrorResponse),
+        (status = 400, description = "Invalid payload, unknown role, or roles chosen by a non-admin", body = ErrorResponse),
         (status = 401, description = "Missing or invalid token", body = ErrorResponse),
-        (status = 403, description = "Admin role required", body = ErrorResponse),
+        (status = 403, description = "Lacking users:create", body = ErrorResponse),
         (status = 409, description = "Email or username already taken", body = ErrorResponse)
     )
 )]
@@ -89,7 +89,18 @@ pub async fn create_user(
     auth: AuthUser,
     Json(payload): Json<CreateUserRequest>,
 ) -> Result<(StatusCode, Json<UserDetail>), AppError> {
-    rbac::require_admin(&state.db, auth.id).await?;
+    let admin = rbac::is_admin(&state.db, auth.id).await?;
+
+    // Administrators pick roles explicitly. Everybody else may only hand out
+    // their own access, so the new account can never exceed the creator.
+    if !admin {
+        rbac::require_permission(&state.db, auth.id, "users:create").await?;
+        if !payload.roles.is_empty() {
+            return Err(AppError::Validation(
+                "only administrators can choose roles when creating a user".to_owned(),
+            ));
+        }
+    }
 
     let email = payload.email.trim().to_lowercase();
     let username = payload.username.trim().to_owned();
@@ -97,17 +108,22 @@ pub async fn create_user(
     validation::username(&username)?;
     validation::password(&payload.password)?;
 
-    let mut role_names: Vec<String> = payload
-        .roles
-        .iter()
-        .map(|role| role.trim().to_owned())
-        .filter(|role| !role.is_empty())
-        .collect();
-    role_names.sort_unstable();
-    role_names.dedup();
-    if role_names.is_empty() {
-        role_names.push("user".to_owned());
-    }
+    let role_names = if admin {
+        let mut names: Vec<String> = payload
+            .roles
+            .iter()
+            .map(|role| role.trim().to_owned())
+            .filter(|role| !role.is_empty())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        if names.is_empty() {
+            names.push("user".to_owned());
+        }
+        names
+    } else {
+        Vec::new()
+    };
 
     let password = payload.password;
     let password_hash = tokio::task::spawn_blocking(move || password::hash_password(&password))
@@ -118,22 +134,24 @@ pub async fn create_user(
 
     let mut tx = state.db.begin().await?;
 
-    let found: Vec<String> = sqlx::query_scalar("SELECT name FROM roles WHERE name = ANY($1)")
-        .bind(&role_names)
-        .fetch_all(&mut *tx)
-        .await?;
+    if admin {
+        let found: Vec<String> = sqlx::query_scalar("SELECT name FROM roles WHERE name = ANY($1)")
+            .bind(&role_names)
+            .fetch_all(&mut *tx)
+            .await?;
 
-    if found.len() != role_names.len() {
-        let found_set: HashSet<&str> = found.iter().map(String::as_str).collect();
-        let missing: Vec<&str> = role_names
-            .iter()
-            .map(String::as_str)
-            .filter(|name| !found_set.contains(*name))
-            .collect();
-        return Err(AppError::Validation(format!(
-            "unknown roles: {}",
-            missing.join(", ")
-        )));
+        if found.len() != role_names.len() {
+            let found_set: HashSet<&str> = found.iter().map(String::as_str).collect();
+            let missing: Vec<&str> = role_names
+                .iter()
+                .map(String::as_str)
+                .filter(|name| !found_set.contains(*name))
+                .collect();
+            return Err(AppError::Validation(format!(
+                "unknown roles: {}",
+                missing.join(", ")
+            )));
+        }
     }
 
     let user_id: Uuid = sqlx::query_scalar(
@@ -151,17 +169,46 @@ pub async fn create_user(
     .await
     .map_err(|err| map_unique_violation(err, "email or username is already taken"))?;
 
-    sqlx::query(
-        r#"
-        INSERT INTO user_roles (user_id, role_id)
-        SELECT $1, id FROM roles WHERE name = ANY($2)
-        ON CONFLICT DO NOTHING
-        "#,
-    )
-    .bind(user_id)
-    .bind(&role_names)
-    .execute(&mut *tx)
-    .await?;
+    if admin {
+        sqlx::query(
+            r#"
+            INSERT INTO user_roles (user_id, role_id)
+            SELECT $1, id FROM roles WHERE name = ANY($2)
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(user_id)
+        .bind(&role_names)
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        // Copy the creator's roles and direct grants inside the same
+        // transaction: the new account starts with exactly the same access,
+        // and no role name (let alone `admin`) can be smuggled in.
+        sqlx::query(
+            r#"
+            INSERT INTO user_roles (user_id, role_id)
+            SELECT $1, role_id FROM user_roles WHERE user_id = $2
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(user_id)
+        .bind(auth.id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO user_permissions (user_id, permission_id)
+            SELECT $1, permission_id FROM user_permissions WHERE user_id = $2
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(user_id)
+        .bind(auth.id)
+        .execute(&mut *tx)
+        .await?;
+    }
 
     tx.commit().await?;
 
