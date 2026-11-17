@@ -13,6 +13,7 @@ use crate::error::{AppError, ErrorResponse};
 use crate::mods;
 use crate::openapi::ApiDoc;
 use crate::rbac;
+use crate::server;
 use crate::state::AppState;
 use crate::users;
 
@@ -57,6 +58,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(auth::routes::router())
         .merge(users::routes::router())
         .merge(rbac::routes::router())
+        .merge(server::routes::router())
         // Only the mods routes accept a body this large; the limit keeps a
         // single upload from being buffered into memory without bound.
         .merge(mods::routes::router().layer(DefaultBodyLimit::max(max_upload)));

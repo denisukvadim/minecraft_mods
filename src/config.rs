@@ -24,6 +24,25 @@ pub struct Config {
     pub admin_email: Option<String>,
     pub admin_username: Option<String>,
     pub admin_password: Option<String>,
+    /// Optional Portainer integration: when absent, the `/server/*` endpoints
+    /// answer 503 instead of failing at startup.
+    pub portainer: Option<PortainerConfig>,
+}
+
+/// Connection settings for the Portainer instance that owns the Minecraft
+/// container. Portainer proxies the Docker API, so no Docker socket is needed.
+#[derive(Debug, Clone)]
+pub struct PortainerConfig {
+    /// Base URL without the trailing slash, e.g. `https://portainer.local:9443`.
+    pub url: String,
+    pub api_key: String,
+    /// Portainer environment (endpoint) that hosts the container.
+    pub endpoint_id: u32,
+    /// Name of the Minecraft container.
+    pub container: String,
+    /// Set to `false` only for a self-signed certificate you cannot add as a CA.
+    pub verify_tls: bool,
+    pub timeout_secs: u64,
 }
 
 impl Config {
@@ -86,6 +105,8 @@ impl Config {
             anyhow::bail!("MODS_MAX_UPLOAD_BYTES must be greater than zero");
         }
 
+        let portainer = portainer()?;
+
         Ok(Self {
             database_url,
             jwt_secret,
@@ -98,8 +119,67 @@ impl Config {
             admin_email,
             admin_username,
             admin_password,
+            portainer,
         })
     }
+}
+
+/// Reads the optional Portainer settings. The integration is either fully
+/// configured or absent: half a configuration is a startup error, not a
+/// silently disabled feature.
+fn portainer() -> Result<Option<PortainerConfig>> {
+    let url = optional("PORTAINER_URL")?;
+    let api_key = optional("PORTAINER_API_KEY")?;
+
+    let (url, api_key) = match (url, api_key) {
+        (None, None) => return Ok(None),
+        (Some(url), Some(api_key)) => (url, api_key),
+        _ => anyhow::bail!("PORTAINER_URL and PORTAINER_API_KEY must be set together"),
+    };
+
+    let url = url.trim_end_matches('/').to_owned();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        anyhow::bail!("PORTAINER_URL must start with http:// or https://");
+    }
+
+    let endpoint_id = parse_or("PORTAINER_ENDPOINT_ID", 1_u32)?;
+    if endpoint_id == 0 {
+        anyhow::bail!("PORTAINER_ENDPOINT_ID must be greater than zero");
+    }
+
+    let container = env::var("MC_CONTAINER").unwrap_or_else(|_| "minecraft".to_owned());
+    let container = container.trim().to_owned();
+    if !is_container_name(&container) {
+        anyhow::bail!(
+            "MC_CONTAINER must start with a letter or digit and contain only letters, digits, `_`, `.` and `-`"
+        );
+    }
+
+    let verify_tls = parse_bool_or("PORTAINER_VERIFY_TLS", true)?;
+    let timeout_secs = parse_or("PORTAINER_TIMEOUT_SECS", 15_u64)?;
+    if timeout_secs == 0 {
+        anyhow::bail!("PORTAINER_TIMEOUT_SECS must be greater than zero");
+    }
+
+    Ok(Some(PortainerConfig {
+        url,
+        api_key,
+        endpoint_id,
+        container,
+        verify_tls,
+        timeout_secs,
+    }))
+}
+
+/// Docker container names are restricted at creation time, but the value is
+/// interpolated into a URL path, so it is validated again here.
+fn is_container_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphanumeric() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }
 
 /// Resolves `MODS_DIR`, creating it when missing. The canonical path is what
@@ -154,5 +234,46 @@ where
             .parse::<T>()
             .map_err(|err| anyhow::anyhow!("{key} is invalid: {err}")),
         _ => Ok(default),
+    }
+}
+
+fn parse_bool_or(key: &str, default: bool) -> Result<bool> {
+    match env::var(key) {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "" => Ok(default),
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            other => anyhow::bail!("{key} must be a boolean, got `{other}`"),
+        },
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(err) => Err(anyhow::anyhow!("failed to read {key}: {err}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_container_name;
+
+    #[test]
+    fn accepts_docker_container_names() {
+        for name in ["minecraft", "mc_1", "mc-server.external", "MC01"] {
+            assert!(is_container_name(name), "{name} should be accepted");
+        }
+    }
+
+    #[test]
+    fn rejects_values_that_could_break_the_url() {
+        for name in [
+            "",
+            "-mc",
+            "mc/server",
+            "mc server",
+            "mc?x=1",
+            "mc#frag",
+            "..",
+            "mc%2F",
+        ] {
+            assert!(!is_container_name(name), "{name} should be rejected");
+        }
     }
 }

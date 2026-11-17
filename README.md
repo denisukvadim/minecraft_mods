@@ -52,6 +52,11 @@ cargo run
 | `MODS_DIR` | ні | `./data/mods` | папка з файлами модів; створюється на старті, шлях канонікалізується |
 | `MODS_MAX_UPLOAD_BYTES` | ні | `134217728` | максимальний розмір одного файлу (128 MiB) |
 | `ADMIN_EMAIL`, `ADMIN_USERNAME`, `ADMIN_PASSWORD` | разом | — | перший адміністратор; задаються всі три або жодна |
+| `PORTAINER_URL`, `PORTAINER_API_KEY` | разом | — | Portainer для керування контейнером Minecraft; без них `/server/*` → `503` |
+| `PORTAINER_ENDPOINT_ID` | ні | `1` | environment (endpoint) Portainer |
+| `MC_CONTAINER` | ні | `minecraft` | ім'я контейнера Minecraft |
+| `PORTAINER_VERIFY_TLS` | ні | `true` | `false` лише для самопідписаного сертифіката |
+| `PORTAINER_TIMEOUT_SECS` | ні | `15` | таймаут запиту до Portainer |
 | `RUST_LOG` | ні | `info,tower_http=debug` | фільтр логів |
 
 ## Авторизація
@@ -126,7 +131,8 @@ curl -X POST http://localhost:8080/api/v1/users/$USER_ID/permissions/$PERMISSION
 mods:read, mods:download, mods:upload, mods:delete,
 users:read,
 roles:read,
-permissions:read
+permissions:read,
+server:manage
 ```
 
 Роль `admin` (system) на кожному старті повертає собі весь каталог — щоб
@@ -263,6 +269,44 @@ curl -s "http://localhost:8080/api/v1/mods/sodium-0.6.13.jar/history?limit=50" \
 слід. Для upload порядок зворотний: файл з'являється, і якщо рядок журналу
 записати не вдалося, файл видаляється — щоб не було «тихих» змін.
 
+## Керування сервером Minecraft (Portainer)
+
+Моди застосовуються лише після перезапуску сервера, тому API вміє керувати
+контейнером Minecraft через HTTP API Portainer. Docker-сокет у контейнер API не
+монтується: Portainer уже має доступ до Docker і виступає проксі.
+
+Налаштування (див. `.env.example`): `PORTAINER_URL`, `PORTAINER_API_KEY`
+(My account → Access tokens), `PORTAINER_ENDPOINT_ID` (типово `1`),
+`MC_CONTAINER` (типово `minecraft`). Якщо URL і токен не задані, `/server/*`
+відповідають `503`, а решта API працює як завжди.
+
+| Метод | Шлях | Що робить |
+|---|---|---|
+| `GET` | `/api/v1/server/status` | стан контейнера, образ, health, кількість рестартів |
+| `POST` | `/api/v1/server/start` | запуск контейнера |
+| `POST` | `/api/v1/server/stop?timeout=30` | graceful stop (`SIGTERM`, далі `SIGKILL` після таймауту) |
+| `POST` | `/api/v1/server/restart?timeout=30` | те саме, але з наступним запуском |
+| `GET` | `/api/v1/server/logs?tail=200&timestamps=false` | хвіст логів stdout+stderr |
+
+```bash
+curl -s http://localhost:8080/api/v1/server/status -H "Authorization: Bearer $TOKEN"
+curl -s -X POST "http://localhost:8080/api/v1/server/restart?timeout=60" \
+  -H "Authorization: Bearer $TOKEN"
+curl -s "http://localhost:8080/api/v1/server/logs?tail=100" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Доступ — динамічне правило `server:manage` (роль `admin` отримує його при старті).
+Start/stop/restart серіалізуються в процесі, щоб два одночасні натискання не
+перетиналися. Логи Docker віддає мультиплексованим потоком (`stdout`/`stderr`
+кадрами) — API його декодує, а для контейнерів із TTY повертає текст як є.
+
+Типовий сценарій застосування модів: `POST /server/stop` → завантажити/видалити
+файли через `/mods` → `POST /server/start`. Поки контейнер запущений, `POST /mods`
+і `DELETE /mods/{file_name}` відповідають `409`: лоадер читає джарки лише при
+старті, і краще не змінювати файли під працюючим сервером. Якщо Portainer не
+налаштований, перевірити стан неможливо, тому обмеження не діє.
+
 ## Ендпоінти
 
 | Метод | Шлях | Доступ |
@@ -285,6 +329,11 @@ curl -s "http://localhost:8080/api/v1/mods/sodium-0.6.13.jar/history?limit=50" \
 | `GET` | `/roles`, `/roles/{id}` | `roles:read` |
 | `POST`/`PATCH`/`DELETE` | `/roles`, `/roles/{id}` | **admin** |
 | `PUT` | `/roles/{id}/permissions` | **admin** |
+| `GET` | `/server/status` | `server:manage` |
+| `POST` | `/server/start` | `server:manage` |
+| `POST` | `/server/stop` | `server:manage` |
+| `POST` | `/server/restart` | `server:manage` |
+| `GET` | `/server/logs` | `server:manage` |
 | `GET` | `/health` | публічно |
 
 Перевірка в хендлері — один виклик:
@@ -317,6 +366,7 @@ src/
 ├── auth/            # jwt, argon2, extractor, routes
 ├── users/           # CRUD користувачів (admin), видача ролей/правил (admin)
 ├── rbac/            # permissions, roles, require_permission, require_admin
+├── server/          # керування контейнером Minecraft через Portainer API
 └── mods/            # файли MODS_DIR: dto, storage (шляхи/журнал), routes
 migrations/
 └── 0001_init.sql    # уся схема; права й system-ролі сідить boot-сідер

@@ -8,6 +8,7 @@ mod openapi;
 mod pagination;
 mod rbac;
 mod seed;
+mod server;
 mod state;
 mod users;
 mod validation;
@@ -39,9 +40,19 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("bootstrap seed failed")?;
 
+    let portainer = server::client::PortainerClient::new(config.portainer.as_ref())
+        .context("Portainer client initialization failed")?;
+    if let Some(client) = &portainer {
+        tracing::info!(
+            container = client.container(),
+            "Minecraft server control is enabled through Portainer"
+        );
+    }
+
     let state = AppState {
         db,
         config: Arc::new(config),
+        portainer: portainer.map(Arc::new),
     };
     let router = app::build_router(state);
 

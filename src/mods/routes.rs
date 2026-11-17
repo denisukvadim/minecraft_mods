@@ -16,6 +16,7 @@ use crate::auth::AuthUser;
 use crate::error::{AppError, ErrorResponse};
 use crate::pagination::Pagination;
 use crate::rbac::service as rbac;
+use crate::server;
 use crate::state::AppState;
 
 use super::dto::{ModFileActionDto, ModFileDto, UploadModForm};
@@ -74,8 +75,9 @@ pub async fn list_mods(
         (status = 400, description = "Missing `file` field or invalid file name", body = ErrorResponse),
         (status = 401, description = "Missing or invalid token", body = ErrorResponse),
         (status = 403, description = "Lacking mods:upload", body = ErrorResponse),
-        (status = 409, description = "A file with that name already exists", body = ErrorResponse),
-        (status = 413, description = "File exceeds MODS_MAX_UPLOAD_BYTES", body = ErrorResponse)
+        (status = 409, description = "A file with that name already exists, or the Minecraft server is running", body = ErrorResponse),
+        (status = 413, description = "File exceeds MODS_MAX_UPLOAD_BYTES", body = ErrorResponse),
+        (status = 502, description = "The Minecraft server state could not be checked", body = ErrorResponse)
     )
 )]
 pub async fn upload_mod(
@@ -84,6 +86,8 @@ pub async fn upload_mod(
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<ModFileDto>), AppError> {
     rbac::require_permission(&state.db, auth.id, "mods:upload").await?;
+    // Reject before the body is buffered: a running server owns its mods.
+    server::ensure_server_stopped(state.portainer.as_deref()).await?;
 
     // Skip non-file form fields; the upload itself must carry a file name.
     let mut field = loop {
@@ -234,7 +238,9 @@ pub async fn download_mod(
         (status = 400, description = "Invalid file name or not a regular file", body = ErrorResponse),
         (status = 401, description = "Missing or invalid token", body = ErrorResponse),
         (status = 403, description = "Lacking mods:delete", body = ErrorResponse),
-        (status = 404, description = "File not found", body = ErrorResponse)
+        (status = 404, description = "File not found", body = ErrorResponse),
+        (status = 409, description = "The Minecraft server is running", body = ErrorResponse),
+        (status = 502, description = "The Minecraft server state could not be checked", body = ErrorResponse)
     )
 )]
 pub async fn delete_mod(
@@ -243,6 +249,7 @@ pub async fn delete_mod(
     Path(file_name): Path<String>,
 ) -> Result<StatusCode, AppError> {
     rbac::require_permission(&state.db, auth.id, "mods:delete").await?;
+    server::ensure_server_stopped(state.portainer.as_deref()).await?;
 
     let path = storage::resolve(&state.config.mods_dir, &file_name)?;
     storage::ensure_regular_file(&path).await?;

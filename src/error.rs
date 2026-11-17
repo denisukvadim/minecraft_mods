@@ -31,6 +31,10 @@ pub enum AppError {
     Database(#[from] sqlx::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Unavailable(String),
+    #[error("{0}")]
+    Upstream(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -64,6 +68,8 @@ impl IntoResponse for AppError {
             Self::PayloadTooLarge(message) => {
                 (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", message)
             }
+            Self::Unavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable", message),
+            Self::Upstream(message) => (StatusCode::BAD_GATEWAY, "upstream_error", message),
             Self::Database(err) => {
                 tracing::error!(error = %err, "database error");
                 (

@@ -19,6 +19,10 @@ pub const PERMISSION_CATALOG: &[(&str, &str)] = &[
     ("users:read", "View users"),
     ("roles:read", "View roles"),
     ("permissions:read", "View the permission catalog"),
+    (
+        "server:manage",
+        "Inspect, start, stop and restart the Minecraft server",
+    ),
 ];
 
 #[derive(Debug, sqlx::FromRow)]

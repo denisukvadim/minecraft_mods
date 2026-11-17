@@ -107,6 +107,10 @@ src/
 │   ├── dto.rs         # PermissionDto, RoleDto/Summary, AccessResponse
 │   ├── service.rs     # PERMISSION_CATALOG, require_permission, require_admin
 │   └── routes.rs      # permissions CRUD, roles CRUD, PUT role permissions
+├── server/
+│   ├── client.rs      # Portainer API: status/start/stop/restart/logs, демаксинг логів
+│   ├── dto.rs         # ServerStatusDto, ServerLogsDto, query-параметри
+│   └── routes.rs      # /server/* під правом server:manage
 └── mods/
     ├── dto.rs         # ModFileDto, ModFileActionDto, UploadModForm
     ├── storage.rs     # валідація імені, resolve, list, atomic upload, log_action
@@ -171,13 +175,18 @@ src/
 | `GET` | `/api/v1/roles`, `/roles/{id}` | `roles:read` |
 | `POST`/`PATCH`/`DELETE` | `/api/v1/roles`, `/roles/{id}` | **admin** |
 | `PUT` | `/api/v1/roles/{id}/permissions` | **admin** |
+| `GET` | `/api/v1/server/status` | `server:manage` |
+| `POST` | `/api/v1/server/start` | `server:manage` |
+| `POST` | `/api/v1/server/stop?timeout=30` | `server:manage` |
+| `POST` | `/api/v1/server/restart?timeout=30` | `server:manage` |
+| `GET` | `/api/v1/server/logs?tail=200&timestamps=false` | `server:manage` |
 | `GET` | `/health` | публічно |
 
 Особливості контрактів:
 
 - list-ендпоінти повертають **масив без total**; пагінація `?limit=&offset=`,
   `limit` клампиться до 1..100, offset ≥ 0. Адмінка тому запитує `limit + 1`;
-- помилки завжди `{ error, message }`; статуси — 400/401/403/404/409/413/500;
+- помилки завжди `{ error, message }`; статуси — 400/401/403/404/409/413/500/502/503;
 - ім'я файлу — один сегмент: без `/`, `\`, `..`, керуючих символів, не починається
   з `.`, максимум 200 символів; symlink не обслуговується;
 - upload атомарний (`.upload-<uuid>` → rename), існуюче ім'я → `409`, ліміт
@@ -202,6 +211,13 @@ src/
   запит; ціна — додатковий `EXISTS`-запит. Кешування (Redis) — можлива оптимізація.
 - **Паролі:** Argon2id у `spawn_blocking`, щоб не блокувати async-рантайм.
 - **CORS:** `CORS_ORIGINS=*` для розробки; у проді — конкретний origin адмінки.
+- **Portainer замість Docker-сокета.** `/server/*` ходить у Portainer HTTP API з
+  `X-API-Key`; контейнер API не отримує `/var/run/docker.sock`. Інтеграція
+  опційна: без `PORTAINER_URL`+`PORTAINER_API_KEY` ці ендпоінти віддають `503`.
+  Start/stop/restart серіалізуються `tokio::sync::Mutex`, щоб кліки не гонялися.
+- **Логи Docker мультиплексовані** (`stream`-байт + 3 нулі + BE `u32` довжина),
+  тому `decode_docker_stream` розбирає кадри, а для TTY-контейнерів повертає
+  текст без змін.
 
 ## 8. Відомі обмеження / технічний борг
 
@@ -218,6 +234,13 @@ src/
 - Немає rate limiting, request-id, метрик, readiness-перевірки окрім `/health`.
 - Імена файлів >200 символів і не-UTF-8 не обслуговуються.
 - Повторний upload того самого імені — `409`, окремого «replace» немає.
+- Upload/delete блокуються, поки контейнер запущений (перевірка через Portainer у
+  хендлері, `409`). Гонка «статус перевірено → сервер стартував» не закривається
+  транзакцією; для адмінки цього достатньо.
+- Немає автоматичного застосування модів: після upload потрібен явний
+  `POST /server/restart` (або stop → зміни → start). Стейт-машини «apply» і
+  перевірки готовності сервера після старту ще немає.
+- Логи віддаються лише хвостом (`tail`), без `follow`/SSE.
 
 ## 9. Пропозиції для подальшої доробки
 
@@ -227,7 +250,7 @@ src/
    у `AuthUser`. Разом із цим — refresh-токени, якщо потрібна довга сесія.
 3. **Ретенція журналу**: періодичне видалення/архівування старих рядків, індекс уже є.
 4. **Сервіс `api` у compose** для локального запуску всього стека (Dockerfile уже є,
-   образ публікується в GHCR з `main`).
+   образ публікується в GHCR з `main`); поруч — `minecraft` і `portainer`.
 5. **Метадані модів** (версія, опис, теги) — або sidecar-файл, або нова таблиця;
    поточний контракт свідомо мінімальний.
 6. **Власник файлу** і права «свій/чужий», якщо з'явиться багато видавців.

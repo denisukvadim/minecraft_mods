@@ -10,6 +10,7 @@ use crate::rbac::dto::{
     AccessResponse, CreatePermissionRequest, CreateRoleRequest, PermissionDto,
     ReplacePermissionsRequest, RoleDto, RoleSummary, UpdateRoleRequest,
 };
+use crate::server::dto::{ServerLogsDto, ServerStatusDto};
 use crate::users::dto::{CreateUserRequest, UpdateUserRequest, UserDetail, UserSummary};
 
 #[derive(utoipa::OpenApi)]
@@ -20,7 +21,9 @@ use crate::users::dto::{CreateUserRequest, UpdateUserRequest, UserDetail, UserSu
         description = "A mod file directory behind JWT authentication and a dynamic permission \
                        system. The catalog is the listing of MODS_DIR: uploads, downloads and \
                        deletions are checked against per-role rules (mods:read, mods:download, \
-                       mods:upload, mods:delete) and written to an audit trail."
+                       mods:upload, mods:delete) and written to an audit trail. The Minecraft \
+                       container is inspected and controlled through Portainer under \
+                       `server:manage`, and file changes are refused while it is running."
     ),
     paths(
         crate::auth::routes::login,
@@ -49,6 +52,11 @@ use crate::users::dto::{CreateUserRequest, UpdateUserRequest, UserDetail, UserSu
         crate::mods::routes::delete_mod,
         crate::mods::routes::file_history,
         crate::mods::routes::list_actions,
+        crate::server::routes::status,
+        crate::server::routes::start,
+        crate::server::routes::stop,
+        crate::server::routes::restart,
+        crate::server::routes::logs,
         crate::app::health
     ),
     components(schemas(
@@ -71,6 +79,8 @@ use crate::users::dto::{CreateUserRequest, UpdateUserRequest, UserDetail, UserSu
         ModFileDto,
         ModFileActionDto,
         UploadModForm,
+        ServerStatusDto,
+        ServerLogsDto,
         HealthResponse
     )),
     tags(
@@ -79,6 +89,7 @@ use crate::users::dto::{CreateUserRequest, UpdateUserRequest, UserDetail, UserSu
         (name = "roles", description = "Roles and the permissions attached to them"),
         (name = "permissions", description = "The dynamic rule catalog"),
         (name = "mods", description = "Mod files on disk and the audit trail"),
+        (name = "server", description = "Minecraft container control through Portainer"),
         (name = "meta", description = "Health and service metadata")
     ),
     modifiers(&SecurityAddon)
@@ -129,6 +140,11 @@ mod tests {
             "/api/v1/mods/{file_name}/download",
             "/api/v1/mods/{file_name}/history",
             "/api/v1/mod-actions",
+            "/api/v1/server/status",
+            "/api/v1/server/start",
+            "/api/v1/server/stop",
+            "/api/v1/server/restart",
+            "/api/v1/server/logs",
         ] {
             assert!(
                 paths.contains_key(expected),
@@ -154,6 +170,14 @@ mod tests {
         assert!(
             mods.post.is_some(),
             "POST /api/v1/mods (multipart upload) is not documented"
+        );
+
+        let server = paths
+            .get("/api/v1/server/status")
+            .expect("/api/v1/server/status is missing");
+        assert!(
+            server.get.is_some(),
+            "GET /api/v1/server/status is not documented"
         );
     }
 }
