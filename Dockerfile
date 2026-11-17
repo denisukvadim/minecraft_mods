@@ -1,7 +1,14 @@
 # syntax=docker/dockerfile:1
 
 # ---- build stage -----------------------------------------------------------
-FROM rust:slim-bookworm AS builder
+FROM rust:1-slim-bookworm AS builder
+
+# `utoipa-swagger-ui` downloads the Swagger UI archive at build time and falls
+# back to the system `curl` (its `reqwest` feature is off), so the builder needs
+# curl plus CA certificates for HTTPS.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
