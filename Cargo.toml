@@ -1,0 +1,24 @@
+[package]
+name = "minecraftmods_backend"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+argon2 = "0.6.0"
+axum = { version = "0.8", features = ["multipart"] }
+chrono = { version = "0.4.45", features = ["serde"] }
+dotenvy = "0.15.7"
+jsonwebtoken = "9"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "uuid", "chrono", "migrate", "derive", "macros"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["full"] }
+tokio-util = { version = "0.7.20", features = ["io"] }
+tower-http = { version = "0.7.1", features = ["trace", "cors"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+utoipa = { version = "6", features = ["chrono", "uuid"] }
+utoipa-swagger-ui = { version = "10", features = ["axum"] }
+uuid = { version = "1.29.3", features = ["v4", "serde"] }
