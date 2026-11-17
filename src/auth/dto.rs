@@ -19,6 +19,16 @@ pub struct TokenResponse {
     pub expires_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ChangePasswordRequest {
+    /// The password in use right now, re-checked before the change.
+    #[schema(example = "correct horse battery staple")]
+    pub current_password: String,
+    /// Replacement password, 8-128 characters, different from the current one.
+    #[schema(example = "a brand new passphrase")]
+    pub new_password: String,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct MeResponse {
     pub id: Uuid,

@@ -25,6 +25,7 @@ use super::storage::{self, ModAction};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/mods", get(list_mods).post(upload_mod))
+        .route("/mods/archive", get(download_archive))
         .route("/mods/{file_name}", delete(delete_mod))
         .route("/mods/{file_name}/download", get(download_mod))
         .route("/mods/{file_name}/history", get(file_history))
@@ -228,6 +229,87 @@ pub async fn download_mod(
 }
 
 #[utoipa::path(
+    get,
+    path = "/api/v1/mods/archive",
+    tag = "mods",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "ZIP archive with every mod file, built on the fly", content_type = "application/zip"),
+        (status = 401, description = "Missing or invalid token", body = ErrorResponse),
+        (status = 403, description = "Lacking mods:download", body = ErrorResponse),
+        (status = 404, description = "There are no mod files to archive", body = ErrorResponse)
+    )
+)]
+pub async fn download_archive(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<impl IntoResponse, AppError> {
+    rbac::require_permission(&state.db, auth.id, "mods:download").await?;
+
+    let files = storage::list(&state.config.mods_dir).await?;
+    if files.is_empty() {
+        return Err(AppError::NotFound("mod file"));
+    }
+
+    // Built next to the mods: same filesystem and enough room; the leading dot
+    // keeps the temporary archive out of listings and API downloads.
+    let temp = state
+        .config
+        .mods_dir
+        .join(format!(".archive-{}.zip", Uuid::new_v4()));
+    let build_path = temp.clone();
+    let mods_dir = state.config.mods_dir.clone();
+
+    let built =
+        tokio::task::spawn_blocking(move || storage::build_archive(&mods_dir, &files, &build_path))
+            .await
+            .map_err(|err| AppError::Internal(anyhow::anyhow!("archive task failed: {err}")))?;
+
+    if let Err(err) = built {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(AppError::Internal(err));
+    }
+
+    let file = match tokio::fs::File::open(&temp).await {
+        Ok(file) => file,
+        Err(err) => {
+            let _ = tokio::fs::remove_file(&temp).await;
+            return Err(AppError::Io(err));
+        }
+    };
+    let size = file.metadata().await.map_err(AppError::Io)?.len();
+
+    // The open handle keeps the data readable after the link is gone, so even
+    // a client that disconnects mid-transfer leaves no archive behind.
+    if let Err(err) = tokio::fs::remove_file(&temp).await {
+        tracing::warn!(path = %temp.display(), error = %err, "could not unlink temporary archive");
+    }
+
+    let name = format!("mods-{}.zip", Utc::now().format("%Y%m%d"));
+    let disposition = HeaderValue::from_str(&format!("attachment; filename=\"{name}\""))
+        .map_err(|err| AppError::Internal(anyhow::anyhow!("invalid archive name header: {err}")))?;
+
+    let headers = [
+        (
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/zip"),
+        ),
+        (header::CONTENT_DISPOSITION, disposition),
+        (header::CONTENT_LENGTH, HeaderValue::from(size)),
+        (
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ),
+    ];
+
+    Ok((
+        StatusCode::OK,
+        headers,
+        Body::from_stream(ReaderStream::new(file)),
+    ))
+}
+
+#[utoipa::path(
     delete,
     path = "/api/v1/mods/{file_name}",
     tag = "mods",
@@ -318,7 +400,7 @@ pub async fn file_history(
     responses(
         (status = 200, description = "File actions, newest first", body = Vec<ModFileActionDto>),
         (status = 401, description = "Missing or invalid token", body = ErrorResponse),
-        (status = 403, description = "Admin role required", body = ErrorResponse)
+        (status = 403, description = "Lacking audit:read", body = ErrorResponse)
     )
 )]
 pub async fn list_actions(
@@ -326,7 +408,7 @@ pub async fn list_actions(
     auth: AuthUser,
     Query(pagination): Query<Pagination>,
 ) -> Result<Json<Vec<ModFileActionDto>>, AppError> {
-    rbac::require_admin(&state.db, auth.id).await?;
+    rbac::require_permission(&state.db, auth.id, "audit:read").await?;
 
     let (limit, offset) = pagination.normalize();
     let actions = sqlx::query_as::<_, ModFileActionDto>(

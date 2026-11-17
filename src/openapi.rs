@@ -3,7 +3,7 @@ use utoipa::openapi::OpenApi;
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 
 use crate::app::HealthResponse;
-use crate::auth::dto::{LoginRequest, MeResponse, TokenResponse};
+use crate::auth::dto::{ChangePasswordRequest, LoginRequest, MeResponse, TokenResponse};
 use crate::error::ErrorResponse;
 use crate::mods::dto::{ModFileActionDto, ModFileDto, UploadModForm};
 use crate::rbac::dto::{
@@ -31,6 +31,7 @@ use crate::users::dto::{CreateUserRequest, UpdateUserRequest, UserDetail, UserSu
     paths(
         crate::auth::routes::login,
         crate::auth::routes::me,
+        crate::auth::routes::change_password,
         crate::users::routes::list_users,
         crate::users::routes::create_user,
         crate::users::routes::get_user,
@@ -52,6 +53,7 @@ use crate::users::dto::{CreateUserRequest, UpdateUserRequest, UserDetail, UserSu
         crate::mods::routes::list_mods,
         crate::mods::routes::upload_mod,
         crate::mods::routes::download_mod,
+        crate::mods::routes::download_archive,
         crate::mods::routes::delete_mod,
         crate::mods::routes::file_history,
         crate::mods::routes::list_actions,
@@ -66,6 +68,7 @@ use crate::users::dto::{CreateUserRequest, UpdateUserRequest, UserDetail, UserSu
         ErrorResponse,
         LoginRequest,
         TokenResponse,
+        ChangePasswordRequest,
         MeResponse,
         UserSummary,
         UserDetail,
@@ -132,6 +135,7 @@ mod tests {
             "/health",
             "/api/v1/auth/login",
             "/api/v1/auth/me",
+            "/api/v1/auth/password",
             "/api/v1/users",
             "/api/v1/users/{id}/roles/{role_id}",
             "/api/v1/users/{id}/permissions/{permission_id}",
@@ -139,6 +143,7 @@ mod tests {
             "/api/v1/roles",
             "/api/v1/roles/{id}/permissions",
             "/api/v1/mods",
+            "/api/v1/mods/archive",
             "/api/v1/mods/{file_name}",
             "/api/v1/mods/{file_name}/download",
             "/api/v1/mods/{file_name}/history",

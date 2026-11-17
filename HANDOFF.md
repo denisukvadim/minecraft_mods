@@ -18,32 +18,35 @@ utoipa 6 + Swagger UI, JWT HS256, Argon2id.
 
 **Готово й перевірено:**
 
-- аутентифікація: `POST /auth/login`, `GET /auth/me`, JWT, Argon2id;
+- аутентифікація: `POST /auth/login`, `GET /auth/me`, `PUT /auth/password`
+  (зміна власного пароля з перевіркою поточного), JWT, Argon2id;
 - динамічний RBAC: permissions, роли, прямі видачі користувачу, `require_permission`;
 - керування користувачами/ролями/правилами — лише системна роль `admin`
   (`require_admin`, перевірка імені ролі, не permission); виняток —
   `POST /users` за `users:create`, де не-адмін отримує рівно власний доступ;
-- моди на диску: list / upload (multipart, атомарний запис) / download / delete;
-- журнал `mod_file_actions` + `GET /mod-actions` (тільки admin) і
+- моди на диску: list / upload (multipart, атомарний запис) / download /
+  ZIP-архів усіх файлів / delete;
+- журнал `mod_file_actions` + `GET /mod-actions` (`audit:read`) і
   `GET /mods/{file_name}/history` (`mods:read`), ідентичність через `LEFT JOIN users`;
 - Swagger UI на `/docs`, OpenAPI JSON на `/api-docs/openapi.json`, `/health`;
-- міграції `0001`–`0005`, seed каталогу правил і system-ролей, bootstrap-адмін;
-- `cargo test --quiet` — **11/11 passed** (хешування, валідація, імена файлів,
-  `Content-Disposition`, наявність шляхів і bearer-схеми в OpenAPI);
+- міграції `0001`–`0003`, seed каталогу правил і system-ролей, bootstrap-адмін;
+- `cargo test` — **17 passed** (хешування, валідація, імена файлів,
+  `Content-Disposition`, ZIP-архів, наявність шляхів і bearer-схеми в OpenAPI);
 - ручний E2E на живій БД (логін, CRUD, upload/download/delete, 403 для не-адміна,
   негайна дія зміни ролей, історія після видалення файлу/користувача).
 
 **Жива БД (важливо):**
 
-- міграції `0001`–`0005` **уже застосовані**; редагувати застосовані файли не можна
+- міграції `0001`–`0003` **уже застосовані**; редагувати застосовані файли не можна
   (SQLx зберігає хеші);
-- у `data/mods` лежить реальний файл користувача
+- у `MODS_DIR` лежить реальний файл користувача
   `trackwork-1.20.1-1.2.4.jar` (577 556 байт) — **не видаляти** під час тестів;
 - у `mod_file_actions` є рядок `id = 7` (upload цього файлу) — **не видаляти**;
 - роль `user` у цій конкретній БД історично мала лише `mods:read`;
   `migrations/0002_user_role_access.sql` при наступному старті додає
-  `mods:upload`, `mods:delete`, `server:manage`, `users:create`. Далі набір
-  редагується через `PUT /roles/{id}/permissions`;
+  `mods:upload`, `mods:delete`, `server:manage`, `users:create`, а
+  `0003_user_role_audit.sql` — `audit:read`. Далі набір редагується через
+  `PUT /roles/{id}/permissions`;
 - `.env` містить реальні креденшели до зовнішнього PostgreSQL. Не комітити, не
   вставляти в документи/логи.
 
@@ -115,8 +118,8 @@ src/
 │   └── routes.rs      # /server/* під правом server:manage
 └── mods/
     ├── dto.rs         # ModFileDto, ModFileActionDto, UploadModForm
-    ├── storage.rs     # валідація імені, resolve, list, atomic upload, log_action
-    └── routes.rs      # list/upload/download/delete/history/mod-actions
+    ├── storage.rs     # валідація імені, resolve, list, atomic upload, ZIP, log_action
+    └── routes.rs      # list/upload/download/archive/delete/history/mod-actions
 ```
 
 Потік запиту: `Router` → handler → `AuthUser` (перечитує користувача з БД) →
@@ -152,7 +155,7 @@ src/
 Каталог прав і system-ролі (`admin`, `user`) створює сідер при старті
 (`src/seed.rs`), тому в міграції їх немає.
 
-**Правило:** для зміни схеми створювати новий файл `migrations/0002_*.sql`
+**Правило:** для зміни схеми створювати новий файл `migrations/<NNNN>_*.sql`
 (вручну або `sqlx migrate add`). Застосовані файли не редагувати.
 
 ## 6. API
@@ -161,12 +164,14 @@ src/
 |---|---|---|
 | `POST` | `/api/v1/auth/login` | публічно |
 | `GET` | `/api/v1/auth/me` | будь-який автентифікований |
+| `PUT` | `/api/v1/auth/password` | будь-який автентифікований (свій пароль) |
 | `GET` | `/api/v1/mods` | `mods:read` (пагінація) |
 | `POST` | `/api/v1/mods` | `mods:upload` (multipart, поле `file`) |
 | `GET` | `/api/v1/mods/{file_name}/download` | `mods:download` |
+| `GET` | `/api/v1/mods/archive` | `mods:download` (ZIP усіх файлів, на льоту) |
 | `DELETE` | `/api/v1/mods/{file_name}` | `mods:delete` |
 | `GET` | `/api/v1/mods/{file_name}/history` | `mods:read` (пагінація) |
-| `GET` | `/api/v1/mod-actions` | **admin** (пагінація) |
+| `GET` | `/api/v1/mod-actions` | `audit:read` (пагінація) |
 | `POST` | `/api/v1/users` | `users:create` (не-адмін копіює власний доступ) |
 | `GET` | `/api/v1/users`, `/users/{id}` | `users:read` |
 | `PATCH`/`DELETE` | `/api/v1/users/{id}` | **admin** |
@@ -195,7 +200,10 @@ src/
   `MODS_MAX_UPLOAD_BYTES` → `413`; якщо запит іде через nginx адмінки, її
   `client_max_body_size` (`CLIENT_MAX_BODY_SIZE`) теж має бути ≥ цього ліміту;
 - download завжди `application/octet-stream`, `Content-Disposition: attachment`,
-  `X-Content-Type-Options: nosniff`; історія для невідомого файлу → `200 []`.
+  `X-Content-Type-Options: nosniff`; історія для невідомого файлу → `200 []`;
+- `GET /mods/archive` → `application/zip`, збирається в `.archive-<uuid>.zip`
+  у `MODS_DIR`, потім дескриптор лишається, а файл одразу unlink-ається;
+  порожня тека → `404`; кожен файл у журнал **не** пишеться.
 
 ## 7. Ключові рішення (чому так)
 
@@ -208,6 +216,13 @@ src/
   `user` отримує базовий набір оператора Mods лише при створенні, щоб
   адміністратор міг забрати право без відновлення після рестарту. Для вже
   наявних БД це робить `0002_user_role_access.sql` одноразово.
+- **Журнал доступний за `audit:read`, а не лише admin.** Оператори Mods бачать,
+  хто що змінював, без прав на керування доступами; `user` отримує це право з
+  seed/`0003_user_role_audit.sql`. Самі мутації доступу лишаються admin-only.
+- **Архів усіх модів — синхронна збірка в `spawn_blocking` + стрім із
+  unlinked-файлу.** JAR вже стиснений, тому `Stored`; архів не пише N рядків у
+  журнал. Мінус: потрібно стільки ж місця на диску, скільки займають моди, поки
+  архів збирається/віддається.
 - **Журнал не дублює ідентичність.** `user_id` + `LEFT JOIN users` дає актуальні
   username/email; після видалення акаунта join дає `NULL` («deleted account»).
   Хто потребує вічної атрибуції — деактивує акаунт, а не видаляє.
@@ -216,6 +231,11 @@ src/
 - **Негайне відкликання доступу.** `AuthUser` і перевірки читають БД на кожен
   запит; ціна — додатковий `EXISTS`-запит. Кешування (Redis) — можлива оптимізація.
 - **Паролі:** Argon2id у `spawn_blocking`, щоб не блокувати async-рантайм.
+- **Зміна власного пароля — `PUT /auth/password`.** Поточний пароль перевіряється,
+  новий валідується і мусить відрізнятися; хибний поточний дає `400`, а не `401`,
+  бо адмінка на будь-який `401` чистить сесію. Токени не відкликаються (немає
+  `token_version`), тому інші пристрої живуть до `exp`. Чужий пароль — лише
+  адміністратор через `PATCH /users/{id}`.
 - **CORS:** `CORS_ORIGINS=*` для розробки; у проді — конкретний origin адмінки.
 - **Portainer замість Docker-сокета.** `/server/*` ходить у Portainer HTTP API з
   `X-API-Key`; контейнер API не отримує `/var/run/docker.sock`. Інтеграція
@@ -282,14 +302,17 @@ cargo run
 1. логін адміна → `/auth/me` містить `mods:read/download/upload/delete`;
 2. upload нового файлу → `201`, файл з'явився в `MODS_DIR`, у журналі рядок `upload`;
 3. list + download → SHA-256 збігається; у журналі `download`;
-4. не-адмін `user`: list/upload/delete `200`/`201`, сервер `200`, загальний
-   журнал `403`;
+4. не-адмін `user`: list/upload/delete `200`/`201`, сервер `200`,
+   `GET /mods/archive` → `200`, загальний журнал `200` (`audit:read`);
 5. видати роль/право → доступ діє без перелогіну;
 6. `user` створює користувача без `roles` → `201`, ролі й прямі права
    збігаються з творцем; передача `roles` від не-адміна → `400`;
 7. `DELETE /mods/{name}` → `204`, файл зник, історія лишилася;
 8. `../`, `%2F`, приховані імена → `400`; повторний upload → `409`;
-9. видалити користувача → у журналі `user_id`/ім'я стають `NULL`.
+9. видалити користувача → у журналі `user_id`/ім'я стають `NULL`;
+10. `PUT /auth/password`: хибний поточний → `400` (не `401`, щоб панель не
+    вибила сесію), короткий новий → `400`, успіх → `204`; старий пароль більше
+    не приймається, новий приймається, раніше виданий JWT діє до `exp`.
 
 **Не робити під час тестів:** не видаляти `trackwork-1.20.1-1.2.4.jar` і рядок
 журналу `id = 7`, не застосовувати `cargo sqlx migrate revert` на живій БД, не
@@ -303,15 +326,16 @@ cargo run
   прибрати з `.env`.
 - `CORS_ORIGINS=*` небезпечний у проді — задайте origin адмінки.
 - Роль `user` у живій БД отримує новий базовий набір із
-  `0002_user_role_access.sql` при наступному старті; якщо міграцію вже
-  застосовано, подальші зміни — лише через `PUT /roles/{id}/permissions`.
+  `0002_user_role_access.sql` та `0003_user_role_audit.sql` при наступному
+  старті; якщо міграції вже застосовано, подальші зміни — лише через
+  `PUT /roles/{id}/permissions`.
 - Видалення користувача незворотно анонімізує його історію.
 - `/docs` змонтований поза `/api/v1`; проксі адмінки має вести і `/docs`.
 
 ## 12. Чеклист «перший день» після повернення
 
 - [ ] переконатися, що `.env` на місці й БД доступна (`/health`);
-- [ ] `cargo test` — 11/11;
+- [ ] `cargo test` — 17/17;
 - [ ] `cargo run`, відкрити `/docs`, залогінитися адміном;
 - [ ] перевірити, що `data/mods` і рядок журналу `id = 7` на місці;
 - [ ] ініціалізувати git (за потреби) і закомітити поточний стан;

@@ -93,11 +93,24 @@ USER_TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
 
 # 4. Поточний користувач з ефективними правами
 curl http://localhost:8080/api/v1/auth/me -H "Authorization: Bearer $USER_TOKEN"
+
+# 5. Зміна власного пароля (поточний перевіряється)
+curl -X PUT http://localhost:8080/api/v1/auth/password \
+  -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"current_password":"correct-horse","new_password":"correct-horse-2"}'
 ```
 
 Пароль зберігається як Argon2id-хеш. Хешування виконується в
 `spawn_blocking`, щоб не блокувати async-рантайм. `AuthUser` перечитує
 користувача з БД на кожен запит, тож `is_active = false` діє негайно.
+
+Кожен автентифікований акаунт може змінити **власний** пароль через
+`PUT /auth/password`: поточний пароль перевіряється, новий має бути 8–128
+символів і відрізнятися від поточного. Хибний поточний пароль дає `400`
+(не `401`), щоб клієнт не сприйняв це як протухлий токен. Видані раніше JWT
+лишаються дійсними до `exp` — окремого `token_version` немає, тому після зміни
+пароля на інших пристроях треба вийти вручну. Пароль **іншого** користувача
+змінює лише адміністратор через `PATCH /users/{id}`.
 
 ## Динамічна рольова система
 
@@ -140,18 +153,20 @@ mods:read, mods:download, mods:upload, mods:delete,
 users:read, users:create,
 roles:read,
 permissions:read,
+audit:read,
 server:manage
 ```
 
 Роль `admin` (system) на кожному старті повертає собі весь каталог — щоб
 випадкове видалення правила не заблокувало адміністраторів назавжди. Роль
 `user` (system) при створенні отримує базовий набір оператора Mods:
-`mods:read/download/upload/delete`, `server:manage` і `users:create`. Якщо
-адміністратор забере ці права, перезапуск їх не поверне.
+`mods:read/download/upload/delete`, `server:manage`, `users:create` і
+`audit:read`. Якщо адміністратор забере ці права, перезапуск їх не поверне.
 
 Перегляд **історії конкретного файлу** (`/mods/{file_name}/history`) доступний за
 `mods:read`, бо це частина розділу Mods. Загальний журнал (`/mod-actions`)
-лишається **admin**: там усі дії й персональні дані.
+вимагає `audit:read`: там усі дії й персональні дані, але оператори Mods бачать
+його без прав на керування доступами.
 
 System-ролі (`admin`, `user`) не можна видалити чи перейменувати, але їхній
 набір правил редагується. Видалення правила каскадно прибирає його з ролей і
@@ -190,7 +205,8 @@ System-ролі (`admin`, `user`) не можна видалити чи пере
 | вивантаження | `mods:upload` |
 | видалення | `mods:delete` |
 | перегляд історії файлу | `mods:read` |
-| загальний журнал | **admin** |
+| завантаження всіх файлів архівом | `mods:download` |
+| загальний журнал | `audit:read` |
 
 ```bash
 # Перелік (ім'я, розмір, mtime), ?limit=&offset=
@@ -203,6 +219,10 @@ curl -X POST http://localhost:8080/api/v1/mods \
 
 # Завантаження: octet-stream + Content-Disposition: attachment
 curl -OJ http://localhost:8080/api/v1/mods/sodium-0.6.13.jar/download \
+  -H "Authorization: Bearer $TOKEN"
+
+# Усі файли одним ZIP (будується на льоту)
+curl -OJ http://localhost:8080/api/v1/mods/archive \
   -H "Authorization: Bearer $TOKEN"
 
 # Видалення
@@ -221,6 +241,12 @@ curl -X DELETE http://localhost:8080/api/v1/mods/sodium-0.6.13.jar \
 - **Вивантаження атомарне:** тіло пишеться в прихований `.upload-<uuid>` у тій
   самій теці, потім перейменовується. Обірваний аплоад не лишає «битого» моду.
   Існуюче ім'я → `409` (спершу видаліть файл, якщо треба замінити).
+- **Архів усіх модів** (`GET /mods/archive`, право `mods:download`) збирається у
+  прихований `.archive-<uuid>.zip` у `MODS_DIR` і віддається потоком; дескриптор
+  відкривається, файл одразу видаляється з диска (на Linux дані живуть, доки
+  відкритий дескриптор), тож обірване завантаження не лишає сміття. JAR вже
+  стиснений, тому записи кладуться без повторного deflate. Архів **не пише**
+  рядок у журнал на кожен файл — інакше один клік додавав би сотні записів.
 - **Ліміт розміру** — `MODS_MAX_UPLOAD_BYTES`. Перевищення дає `413`, частково
   записаний файл видаляється. Якщо запит іде через nginx адмін-панелі, той має
   власний `client_max_body_size` (`CLIENT_MAX_BODY_SIZE`, типово `128m`): він
@@ -231,7 +257,8 @@ curl -X DELETE http://localhost:8080/api/v1/mods/sodium-0.6.13.jar \
 
 ### Журнал дій
 
-Кожен upload/download/delete пише рядок у `mod_file_actions`:
+Кожен upload, download окремого файлу і delete пише рядок у `mod_file_actions`
+(ZIP-архів усіх файлів навмисно не пише N рядків — див. вище):
 
 | Колонка | Зміст |
 |---|---|
@@ -274,8 +301,8 @@ curl -s "http://localhost:8080/api/v1/mods/sodium-0.6.13.jar/history?limit=50" \
 ```
 
 Історія конкретного файлу доступна за `mods:read`, а загальний журнал
-(`/mod-actions`) — лише адміністратору: там усі дії й персональні дані. Історія
-зберігається в БД і не залежить від диска, тому:
+(`/mod-actions`) — за `audit:read`. Історія зберігається в БД і не залежить від
+диска, тому:
 
 - після `DELETE /mods/{file_name}` вона лишається доступною;
 - після видалення користувача `user_id` стає `null` (`ON DELETE SET NULL`), і
@@ -334,12 +361,14 @@ Start/stop/restart серіалізуються в процесі, щоб два
 |---|---|---|
 | `POST` | `/auth/login` | публічно |
 | `GET` | `/auth/me` | будь-який автентифікований |
+| `PUT` | `/auth/password` | будь-який автентифікований (свій пароль) |
 | `GET` | `/mods` | `mods:read` |
 | `POST` | `/mods` | `mods:upload` |
 | `GET` | `/mods/{file_name}/download` | `mods:download` |
+| `GET` | `/mods/archive` | `mods:download` (ZIP усіх файлів, на льоту) |
 | `DELETE` | `/mods/{file_name}` | `mods:delete` |
 | `GET` | `/mods/{file_name}/history` | `mods:read` |
-| `GET` | `/mod-actions` | **admin** |
+| `GET` | `/mod-actions` | `audit:read` |
 | `POST` | `/users` | `users:create` (не-адмін копіює власний доступ) |
 | `GET` | `/users`, `/users/{id}` | `users:read` |
 | `PATCH`/`DELETE` | `/users/{id}` | **admin** |
@@ -478,7 +507,8 @@ cargo test
 3. `GET /mods` → файл у списку, `GET /mods/{name}/download` → той самий SHA-256;
 4. `GET /mod-actions` → рядки `upload` і `download` з `user_id` і часом;
 5. акаунт із роллю `user`: list/upload/download/delete `200`/`201`, сервер
-   `200`, загальний журнал `/mod-actions` `403`;
+   `200`, `GET /mods/archive` → `200 application/zip` з усіма файлами,
+   `/mod-actions` → `200` завдяки `audit:read`;
 6. він створює користувача без `roles` → `201`, новий акаунт має ті самі ролі
    й прямі права; спроба передати `roles` → `400`, підвищити доступ неможливо;
 7. `DELETE /mods/{name}` → `204` і новий рядок у журналі; `../`, `%2F` у імені →
@@ -486,7 +516,10 @@ cargo test
 8. `GET /mods/{name}/history` → `200` для `mods:read`, `username`/`user_email`
    приходять з `users` через join; для `../` — `400`;
 9. після видалення файлу історія лишається; після видалення користувача
-   `user_id` і разом з ним `username`/`user_email` стають `null`.
+   `user_id` і разом з ним `username`/`user_email` стають `null`;
+10. `PUT /auth/password`: хибний поточний пароль → `400`, короткий новий → `400`,
+    успіх → `204`, старий пароль більше не пускає, новий пускає; старий JWT
+    лишається дійсним до `exp`.
 
 ## Міграції
 

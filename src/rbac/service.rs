@@ -23,6 +23,7 @@ pub const PERMISSION_CATALOG: &[(&str, &str)] = &[
     ),
     ("roles:read", "View roles"),
     ("permissions:read", "View the permission catalog"),
+    ("audit:read", "View the audit trail"),
     (
         "server:manage",
         "Inspect, start, stop and restart the Minecraft server",

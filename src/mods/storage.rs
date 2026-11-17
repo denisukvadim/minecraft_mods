@@ -95,6 +95,38 @@ pub async fn ensure_regular_file(path: &Path) -> Result<std::fs::Metadata, AppEr
     Ok(metadata)
 }
 
+/// Writes every regular file in `MODS_DIR` into a ZIP archive at `target`.
+/// Mods ship as JARs, which are already compressed, so entries are stored
+/// as-is instead of being deflated a second time.
+pub fn build_archive(mods_dir: &Path, files: &[ModFileDto], target: &Path) -> anyhow::Result<()> {
+    let file = std::fs::File::create(target)?;
+    let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .unix_permissions(0o644);
+
+    for entry in files {
+        let path = mods_dir.join(&entry.file_name);
+        // Re-check the entry: the directory may change between listing and
+        // reading, and a symlink must never end up in the archive.
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err.into()),
+        };
+        if !metadata.file_type().is_file() {
+            continue;
+        }
+
+        zip.start_file(&entry.file_name, options)?;
+        let mut source = std::fs::File::open(&path)?;
+        std::io::copy(&mut source, &mut zip)?;
+    }
+
+    zip.finish()?;
+    Ok(())
+}
+
 /// Reads the directory into memory, skipping directories, symlinks, hidden
 /// files and names that are not valid UTF-8 (the API cannot address those).
 pub async fn list(mods_dir: &Path) -> Result<Vec<ModFileDto>, AppError> {
@@ -229,5 +261,44 @@ mod tests {
         assert!(header.is_ascii());
         assert!(header.contains("filename=\"___.jar\""));
         assert!(header.contains("filename*=UTF-8''%D0%BC%D0%BE%D0%B4.jar"));
+    }
+
+    #[test]
+    fn archive_contains_every_regular_file() {
+        let dir = std::env::temp_dir().join(format!("mods-archive-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("alpha.jar"), b"alpha").expect("first file");
+        std::fs::write(dir.join("beta.jar"), b"beta").expect("second file");
+
+        let files = vec![
+            ModFileDto {
+                file_name: "alpha.jar".to_owned(),
+                size_bytes: 5,
+                modified_at: None,
+            },
+            ModFileDto {
+                file_name: "beta.jar".to_owned(),
+                size_bytes: 4,
+                modified_at: None,
+            },
+        ];
+        let target = dir.join(".archive.zip");
+
+        build_archive(&dir, &files, &target).expect("archive builds");
+
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&target).expect("archive file"))
+            .expect("valid zip");
+        assert_eq!(archive.len(), 2);
+        assert_eq!(
+            std::io::read_to_string(archive.by_name("alpha.jar").expect("alpha"))
+                .expect("read alpha"),
+            "alpha"
+        );
+        assert_eq!(
+            std::io::read_to_string(archive.by_name("beta.jar").expect("beta")).expect("read beta"),
+            "beta"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }

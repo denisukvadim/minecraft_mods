@@ -1,13 +1,15 @@
 use axum::extract::State;
-use axum::routing::{get, post};
+use axum::http::StatusCode;
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use uuid::Uuid;
 
 use crate::error::{AppError, ErrorResponse};
 use crate::rbac::service as rbac;
 use crate::state::AppState;
+use crate::validation;
 
-use super::dto::{LoginRequest, MeResponse, TokenResponse};
+use super::dto::{ChangePasswordRequest, LoginRequest, MeResponse, TokenResponse};
 use super::extractor::AuthUser;
 use super::{jwt, password};
 
@@ -15,6 +17,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/auth/login", post(login))
         .route("/auth/me", get(me))
+        .route("/auth/password", put(change_password))
 }
 
 #[derive(sqlx::FromRow)]
@@ -106,4 +109,66 @@ pub async fn me(
         roles,
         permissions,
     }))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/auth/password",
+    tag = "auth",
+    security(("bearer_auth" = [])),
+    request_body = ChangePasswordRequest,
+    responses(
+        (status = 204, description = "Password changed; existing tokens stay valid until they expire"),
+        (status = 400, description = "Invalid new password or incorrect current password", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid token", body = ErrorResponse)
+    )
+)]
+pub async fn change_password(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(payload): Json<ChangePasswordRequest>,
+) -> Result<StatusCode, AppError> {
+    validation::password(&payload.new_password)?;
+
+    if payload.new_password == payload.current_password {
+        return Err(AppError::Validation(
+            "the new password must be different from the current one".to_owned(),
+        ));
+    }
+
+    let stored_hash: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
+        .bind(auth.id)
+        .fetch_one(&state.db)
+        .await?;
+
+    let current = payload.current_password;
+    let matches =
+        tokio::task::spawn_blocking(move || password::verify_password(&current, &stored_hash))
+            .await
+            .map_err(|err| {
+                AppError::Internal(anyhow::anyhow!("password verification task failed: {err}"))
+            })?;
+
+    if !matches {
+        // 400 rather than 401 on purpose: the token is valid, and the admin
+        // panel signs the user out on any 401 from an API call.
+        return Err(AppError::Validation(
+            "current password is incorrect".to_owned(),
+        ));
+    }
+
+    let new_password = payload.new_password;
+    let password_hash = tokio::task::spawn_blocking(move || password::hash_password(&new_password))
+        .await
+        .map_err(|err| {
+            AppError::Internal(anyhow::anyhow!("password hashing task failed: {err}"))
+        })??;
+
+    sqlx::query("UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1")
+        .bind(auth.id)
+        .bind(&password_hash)
+        .execute(&state.db)
+        .await?;
+
+    Ok(StatusCode::NO_CONTENT)
 }

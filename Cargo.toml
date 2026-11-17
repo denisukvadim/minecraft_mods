@@ -23,3 +23,4 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 utoipa = { version = "6", features = ["chrono", "uuid"] }
 utoipa-swagger-ui = { version = "10", features = ["axum"] }
 uuid = { version = "1.29.3", features = ["v4", "serde"] }
+zip = { version = "2", default-features = false }

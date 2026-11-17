@@ -77,7 +77,7 @@ pub async fn bootstrap(pool: &PgPool, config: &Config) -> anyhow::Result<()> {
             SELECT $1, id FROM permissions
             WHERE code IN (
                 'mods:read', 'mods:download', 'mods:upload', 'mods:delete',
-                'server:manage', 'users:create'
+                'server:manage', 'users:create', 'audit:read'
             )
             ON CONFLICT DO NOTHING
             "#,
